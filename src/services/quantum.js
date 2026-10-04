@@ -73,6 +73,38 @@ export async function buildProblem() {
   };
 }
 
+const toRad = (x) => (x * Math.PI) / 180;
+const km = (a, b) => {
+  const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(h));
+};
+
+/** Classical fallback used ONLY when the QAOA service fails: pairs each donation with the open
+ *  request whose needed quantity is closest to it (ties: nearest). Clearly labelled as non-quantum. */
+function quantityFallback(problem, reason) {
+  const t0 = Date.now();
+  const usedReq = new Set();
+  const assignments = [];
+  for (const d of [...problem.donations].sort((a, b) => b.quantity - a.quantity)) {
+    let best = null;
+    for (const r of problem.requests) {
+      if (usedReq.has(r.id)) continue;
+      if (d.isVeg === false && r.vegOnly) continue;
+      const diff = Math.abs(r.quantity - d.quantity);
+      const dist = km(d, r);
+      if (!best || diff < best.diff || (diff === best.diff && dist < best.dist)) best = { r, diff, dist };
+    }
+    if (!best) continue;
+    usedReq.add(best.r.id);
+    assignments.push({ donationId: d.id, requestId: best.r.id, ngoId: best.r.ngoId, quantity: Math.min(d.quantity, best.r.quantity),
+      distanceKm: best.dist, foodQuality: 0.6, freshness: 0.5, urgency: 0.3, deliveryMinutes: Math.round(best.dist / 20 * 60 + 15), netBenefit: 1 });
+  }
+  return { assignments, executionMode: 'classical-fallback', backend: 'quantity-matching (QAOA unavailable)', numberOfVariables: assignments.length,
+    numberOfConstraints: 0, objectiveValue: null, executionTime: (Date.now() - t0) / 1000, batches: [], decomposition: null, pruned: [], visualization: undefined,
+    note: `Quantum solver unavailable (${reason}). Matched by food quantity instead.` };
+}
+
 export async function runMatching({ trigger = 'manual', userId } = {}) {
   if (running) { scheduleRematch('queued while running'); return { status: 'queued' }; }
   running = true;
@@ -93,12 +125,20 @@ export async function runMatching({ trigger = 'manual', userId } = {}) {
     }
 
     io?.emit('quantum:status', { runId, stage: 'running_qaoa' });
-    const res = await fetch(`${env.quantumUrl}/quantum/solve`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ runId, ...problem }), signal: AbortSignal.timeout(10 * 60 * 1000),
-    });
-    const out = await res.json();
-    if (!res.ok) throw new Error(out.detail || 'Quantum service error');
+    let out;
+    try {
+      const res = await fetch(`${env.quantumUrl}/quantum/solve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, ...problem }), signal: AbortSignal.timeout(150 * 1000),
+      });
+      out = await res.json();
+      if (!res.ok) throw new Error(out.detail || 'Quantum service error');
+      if (!out.assignments?.length) throw new Error('QAOA found no feasible assignment');
+    } catch (qe) {
+      // Honest fallback: the quantum solver was unavailable, so match by food quantity and say so.
+      console.error('[quantum] QAOA unavailable, using quantity-based fallback:', qe.message);
+      out = quantityFallback(problem, qe.message);
+    }
 
     io?.emit('quantum:status', { runId, stage: 'validating' });
     // Re-check against the *current* DB state: data may have changed while QAOA ran.
@@ -126,7 +166,7 @@ export async function runMatching({ trigger = 'manual', userId } = {}) {
       executionMode: out.executionMode, backend: out.backend, numberOfVariables: out.numberOfVariables,
       numberOfConstraints: out.numberOfConstraints, objectiveValue: out.objectiveValue, executionTime: out.executionTime,
       assignments: accepted, batches: out.batches, decomposition: out.decomposition, pruned: out.pruned?.slice(0, 300),
-      visualization: out.visualization, message: accepted.length ? null : 'No feasible quantum matching found.' });
+      visualization: out.visualization, message: accepted.length ? (out.note || null) : 'No feasible quantum matching found.' });
     await run.save();
     io?.emit('quantum:status', { runId, stage: 'done', status: run.status, matches: accepted.length });
     emitToRole('ADMIN', 'quantum:run', { runId });
