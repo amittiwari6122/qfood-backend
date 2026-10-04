@@ -50,8 +50,11 @@ r.post('/register', authLimiter, upload.single('avatar'), validate([
       contactPerson: name, phone, email, address, operatingAreas: city ? [city] : [] });
   }
   await AuditLog.create({ actor: user._id, action: 'register', entity: 'User', entityId: user._id, meta: risk, ip: req.ip });
-  const otp = await issueOtp(user, 'verify_phone');
-  res.status(201).json({ token: signToken(user), user: user.toSafe(), ...otp });
+  // Phone OTP step removed: mark phone as verified automatically.
+  user.phoneVerified = true;
+  if (['DONOR', 'BENEFICIARY'].includes(user.role) && !user.riskFlags.length) user.verificationStatus = 'VERIFIED';
+  await user.save();
+  res.status(201).json({ token: signToken(user), user: user.toSafe() });
 }));
 
 r.post('/login', authLimiter, validate([body('email').isEmail().normalizeEmail(), body('password').notEmpty()]), asyncHandler(async (req, res) => {
