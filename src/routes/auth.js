@@ -17,6 +17,19 @@ const r = Router();
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
 const PHONE = /^\+?[0-9]{10,14}$/;
 
+/** Verification removed: every non-blocked account is active + verified so matching works immediately. */
+async function autoVerify(user) {
+  if (['BLOCKED', 'SUSPENDED'].includes(user.accountStatus)) return user;
+  let changed = false;
+  if (user.accountStatus !== 'ACTIVE') { user.accountStatus = 'ACTIVE'; changed = true; }
+  if (user.verificationStatus !== 'VERIFIED') { user.verificationStatus = 'VERIFIED'; changed = true; }
+  if (!user.phoneVerified) { user.phoneVerified = true; changed = true; }
+  if (user.role === 'DELIVERY' && user.available === false) { user.available = true; changed = true; }
+  if (changed) await user.save();
+  if (user.role === 'NGO') await NgoProfile.updateOne({ user: user._id, verificationStatus: { $ne: 'VERIFIED' } }, { verificationStatus: 'VERIFIED' });
+  return user;
+}
+
 async function issueOtp(user, purpose) {
   const code = makeOtp();
   user.otp = { codeHash: hashOtp(code), expiresAt: new Date(Date.now() + 10 * 60 * 1000), purpose, attempts: 0 };
@@ -42,7 +55,7 @@ r.post('/register', authLimiter, upload.single('avatar'), validate([
   const risk = await registrationRisk({ email, phone }, req.ip);
   const user = new User({ name, email, phone, password, role, address, city,
     location: lat && lng ? { type: 'Point', coordinates: [+lng, +lat] } : undefined,
-    accountStatus: risk.flags.length ? 'REVIEW_REQUIRED' : 'ACTIVE', riskFlags: risk.flags, riskScore: risk.score });
+    accountStatus: 'ACTIVE', riskFlags: risk.flags, riskScore: risk.score });
   if (req.file) user.avatarUrl = (await storage.save(req.file, 'avatars')).url;
   await user.save();
   if (role === 'NGO') {
@@ -51,9 +64,7 @@ r.post('/register', authLimiter, upload.single('avatar'), validate([
   }
   await AuditLog.create({ actor: user._id, action: 'register', entity: 'User', entityId: user._id, meta: risk, ip: req.ip });
   // Phone OTP step removed: mark phone as verified automatically.
-  user.phoneVerified = true;
-  if (['DONOR', 'BENEFICIARY'].includes(user.role) && !user.riskFlags.length) user.verificationStatus = 'VERIFIED';
-  await user.save();
+  await autoVerify(user);
   res.status(201).json({ token: signToken(user), user: user.toSafe() });
 }));
 
@@ -70,10 +81,12 @@ r.post('/login', authLimiter, validate([body('email').isEmail().normalizeEmail()
   if (user.accountStatus === 'BLOCKED') throw new ApiError(403, 'This account is blocked');
   user.failedLogins = 0; user.lockUntil = undefined; user.lastLogin = new Date();
   await user.save();
+  await autoVerify(user);
   res.json({ token: signToken(user), user: user.toSafe() });
 }));
 
 r.get('/me', protect, asyncHandler(async (req, res) => {
+  await autoVerify(req.user);
   const ngo = req.user.role === 'NGO' ? await NgoProfile.findOne({ user: req.user._id }) : null;
   res.json({ user: req.user.toSafe(), ngo });
 }));
