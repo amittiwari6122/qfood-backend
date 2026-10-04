@@ -24,8 +24,8 @@ r.get('/problem', authorize('ADMIN', 'NGO', 'DONOR'), asyncHandler(async (_req, 
     possibleAssignments: p.donations.length * p.requests.length });
 }));
 
-r.post('/run', authorize('ADMIN'), asyncHandler(async (req, res) => {
-  res.json(await runMatching({ trigger: 'manual (admin)', userId: req.user._id }));
+r.post('/run', authorize('ADMIN', 'DONOR', 'NGO', 'BENEFICIARY'), asyncHandler(async (req, res) => {
+  res.json(await runMatching({ trigger: 'manual', userId: req.user._id }));
 }));
 
 r.get('/runs', authorize('ADMIN', 'NGO', 'DONOR'), asyncHandler(async (_req, res) => {
