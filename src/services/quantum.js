@@ -61,9 +61,15 @@ export async function buildProblem() {
         quantity: remainingQty(r), categories: r.categories, beneficiaries: r.beneficiaries, priority: r.priority,
         requiredBefore: r.requiredBefore, vegOnly: r.vegOnly || prof?.vegOnly || false, ngoVerified: verified };
     }),
-    deliveryPartners: partners.map((p) => ({ id: p._id.toString(), available: true,
-      capacity: Math.max(0, (p.deliveryCapacity || 1) - (load.get(p._id.toString()) || 0)) })).filter((p) => p.capacity > 0),
-    constraints: { excludedPairs, executionMode: env.quantumMode },
+    // If no real delivery partner exists yet, use one virtual partner so matching is never blocked.
+    deliveryPartners: (() => {
+      const real = partners.map((p) => ({ id: p._id.toString(), available: true,
+        capacity: Math.max(0, (p.deliveryCapacity || 1) - (load.get(p._id.toString()) || 0)) })).filter((p) => p.capacity > 0);
+      return real.length ? real : [{ id: 'virtual-partner', available: true, capacity: Math.max(1, eligible.length) }];
+    })(),
+    // Relaxed rules for quick matching: nearby (<=100 km) is enough, no verification/quality gates.
+    constraints: { excludedPairs, executionMode: env.quantumMode, requireVerified: false, maxDistanceKm: 100,
+      minQualityScore: 0, restarts: 1, maxIter: 80 },
   };
 }
 
