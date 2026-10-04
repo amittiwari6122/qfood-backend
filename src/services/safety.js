@@ -20,8 +20,6 @@ export function isMatchable(d, donor, now = new Date()) {
   if (d.status !== 'AVAILABLE') return false;
   if (new Date(d.usableUntil) <= now) return false;
   if (d.ai?.status === 'UNSAFE') return false;
-  const aiOk = ['SAFE', 'CAUTION'].includes(d.ai?.status);
-  if (!aiOk && d.manualReview?.status !== 'APPROVED') return false;
   if (donor && ['SUSPENDED', 'BLOCKED'].includes(donor.accountStatus)) return false;
   if (donor && ['SUSPENDED', 'REJECTED'].includes(donor.verificationStatus)) return false;
   return true;
