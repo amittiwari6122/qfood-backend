@@ -17,11 +17,12 @@ import { ApiError, asyncHandler } from '../utils/http.js';
 const r = Router();
 r.use(protect);
 
-const dt = (date, time) => (date && time ? new Date(`${date}T${time}`) : date ? new Date(date) : undefined);
+// Form times are India local time (IST, +05:30); the server runs in UTC.
+const dt = (date, time) => (date && time ? new Date(`${date}T${time}+05:30`) : date ? new Date(date) : undefined);
 
 function statusFromAi(ai) {
   if (ai.status === 'UNSAFE') return 'REJECTED';
-  if (ai.status === 'MANUAL_REVIEW') return 'PENDING_REVIEW';
+  if (ai.status === 'MANUAL_REVIEW') return 'AVAILABLE'; // admin review disabled
   return 'AVAILABLE';
 }
 
@@ -61,7 +62,7 @@ r.post('/', authorize('DONOR'), upload.array('images', 4), validate([
   doc.manualReview = { required: doc.status === 'PENDING_REVIEW', status: doc.status === 'PENDING_REVIEW' ? 'PENDING' : 'NONE' };
 
   const flags = await donationRisk(req.user._id, doc);
-  if (flags.length) { doc.status = 'PENDING_REVIEW'; doc.manualReview = { required: true, status: 'PENDING', notes: `Risk flags: ${flags.join(', ')}` }; }
+  if (flags.length) doc.manualReview = { ...doc.manualReview, notes: `Risk flags: ${flags.join(', ')}` }; // flagged donations still go live
 
   const d = await Donation.create(doc);
   if (d.status === 'PENDING_REVIEW') emitToRole('ADMIN', 'review:new', { donationId: d._id });
