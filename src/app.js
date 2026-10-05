@@ -12,6 +12,7 @@ import donationRoutes from './routes/donations.js';
 import requestRoutes from './routes/requests.js';
 import quantumRoutes from './routes/quantum.js';
 import deliveryRoutes from './routes/deliveries.js';
+import wasteRoutes from './routes/waste.js';
 import socialRoutes from './routes/social.js';
 import analyticsRoutes from './routes/analytics.js';
 import { notFound, errorHandler } from './middleware/error.js';
@@ -35,6 +36,7 @@ app.use('/api/donations', donationRoutes);
 app.use('/api/requests', requestRoutes);
 app.use('/api/quantum', quantumRoutes);
 app.use('/api/deliveries', deliveryRoutes);
+app.use('/api/waste', wasteRoutes);
 app.use('/api', socialRoutes);
 app.use('/api/analytics', analyticsRoutes);
 

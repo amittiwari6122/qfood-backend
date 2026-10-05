@@ -1,8 +1,8 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 
-export const ROLES = ['DONOR', 'NGO', 'BENEFICIARY', 'DELIVERY', 'ADMIN'];
-export const PUBLIC_ROLES = ['DONOR', 'NGO', 'BENEFICIARY', 'DELIVERY'];
+export const ROLES = ['DONOR', 'NGO', 'BENEFICIARY', 'DELIVERY', 'WASTE_PARTNER', 'ADMIN'];
+export const PUBLIC_ROLES = ['DONOR', 'NGO', 'BENEFICIARY', 'DELIVERY', 'WASTE_PARTNER'];
 export const ACCOUNT_STATUS = ['ACTIVE', 'PENDING_VERIFICATION', 'REVIEW_REQUIRED', 'SUSPENDED', 'BLOCKED'];
 export const VERIFICATION = ['PENDING', 'VERIFIED', 'REVIEW_REQUIRED', 'REJECTED', 'SUSPENDED'];
 

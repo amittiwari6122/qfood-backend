@@ -13,6 +13,7 @@ const deliverySchema = new mongoose.Schema({
   route: { distanceKm: Number, durationMin: Number, geometry: [[Number]], provider: String },
   track: [{ lat: Number, lng: Number, at: { type: Date, default: Date.now } }],
   timeline: [{ status: String, at: { type: Date, default: Date.now }, note: String }],
+  mode: { type: String, enum: ['PARTNER', 'RECIPIENT_PICKUP', 'DONOR_DROP'], default: 'PARTNER' },
   failureReason: String,
 }, { timestamps: true });
 

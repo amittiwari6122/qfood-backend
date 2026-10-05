@@ -20,6 +20,14 @@ function canSee(d, u) {
   return [d.partner?._id ?? d.partner, d.recipient?._id ?? d.recipient, d.donation?.donor].some((x) => x?.toString() === u._id.toString());
 }
 const push = (d, status, note) => { d.status = status; d.timeline.push({ status, note }); };
+const norm = (v) => String(v ?? '').replace(/\D/g, '');
+const sameId = (a, b) => a?.toString() === b?.toString();
+const idOf = (x) => x?._id ?? x;
+async function complete(d) {
+  await Donation.updateOne({ _id: d.donation._id }, { status: 'COMPLETED' });
+  if (d.assignment) await QuantumMatchingAssignment.updateOne({ _id: d.assignment }, { assignmentStatus: 'COMPLETED' });
+  await notifyMany([d.donation.donor, d.recipient._id], { type: 'completed', title: 'Donation delivered', body: `${d.donation.foodName} reached ${d.recipient.name}. Leave feedback?`, link: '/app/feedback' });
+}
 const broadcast = (d) => emitToRoom(`delivery:${d._id}`, 'delivery:update', { deliveryId: d._id, status: d.status, timeline: d.timeline });
 
 r.get('/', asyncHandler(async (req, res) => {
@@ -45,7 +53,7 @@ r.get('/:id', asyncHandler(async (req, res) => {
   res.json(o);
 }));
 
-r.post('/:id/claim', authorize('DELIVERY'), requireVerified, asyncHandler(async (req, res) => {
+r.post('/:id/claim', authorize('DELIVERY'), asyncHandler(async (req, res) => {
   const d = await Delivery.findOneAndUpdate({ _id: req.params.id, status: 'AWAITING_PARTNER' },
     { partner: req.user._id, status: 'ASSIGNED', $push: { timeline: { status: 'ASSIGNED', note: req.user.name } } }, { new: true }).populate(POP);
   if (!d) throw new ApiError(409, 'Another partner already took this delivery');
@@ -55,19 +63,42 @@ r.post('/:id/claim', authorize('DELIVERY'), requireVerified, asyncHandler(async 
   res.json(d);
 }));
 
-r.post('/:id/pickup', authorize('DELIVERY'), validate([body('otp').isLength({ min: 6, max: 6 }).withMessage('Enter the 6-digit pickup code from the donor')]), asyncHandler(async (req, res) => {
-  const d = await Delivery.findOne({ _id: req.params.id, partner: req.user._id, status: 'ASSIGNED' }).select('+pickupOtp').populate(POP);
-  if (!d) throw new ApiError(404, 'Delivery not found');
-  if (d.pickupOtp !== req.body.otp) throw new ApiError(400, 'Pickup code does not match');
-  push(d, 'PICKED_UP'); push(d, 'IN_TRANSIT');
-  await d.save();
-  await Donation.updateOne({ _id: d.donation._id }, { status: 'IN_TRANSIT' });
-  await notify(d.recipient._id, { type: 'delivery', title: 'Food picked up', body: `${d.donation.foodName} is on the way.`, link: `/app/track/${d._id}` });
+// Delivery partner is optional: the recipient can collect, or the donor can drop the food off.
+r.post('/:id/self', asyncHandler(async (req, res) => {
+  const d0 = await Delivery.findOne({ _id: req.params.id, status: 'AWAITING_PARTNER' }).populate(POP);
+  if (!d0) throw new ApiError(409, 'This delivery already has someone assigned');
+  const isRecipient = sameId(d0.recipient._id, req.user._id);
+  const isDonor = sameId(d0.donation.donor, req.user._id);
+  if (!isRecipient && !isDonor) throw new ApiError(403, 'Only the donor or the receiving NGO can do this');
+  const mode = isRecipient ? 'RECIPIENT_PICKUP' : 'DONOR_DROP';
+  const d = await Delivery.findOneAndUpdate({ _id: d0._id, status: 'AWAITING_PARTNER' },
+    { partner: req.user._id, mode, status: 'ASSIGNED', $push: { timeline: { status: 'ASSIGNED', note: isRecipient ? `${req.user.name} will pick it up` : `${req.user.name} will drop it off` } } }, { new: true }).populate(POP);
+  if (!d) throw new ApiError(409, 'This delivery already has someone assigned');
+  if (mode === 'DONOR_DROP') { push(d, 'PICKED_UP'); push(d, 'IN_TRANSIT'); await d.save(); await Donation.updateOne({ _id: d.donation._id }, { status: 'IN_TRANSIT' }); }
+  await notify(isRecipient ? d.donation.donor : d.recipient._id, { type: 'delivery', title: isRecipient ? 'NGO will pick up the food' : 'Donor will bring the food',
+    body: isRecipient ? `${req.user.name} will collect ${d.donation.foodName} themselves. Share the pickup code with them.` : `${req.user.name} will deliver ${d.donation.foodName} to you. Give them the delivery code when it arrives.`, link: `/app/track/${d._id}` });
   broadcast(d);
   res.json(d);
 }));
 
-r.post('/:id/location', authorize('DELIVERY'), validate([body('lat').isFloat(), body('lng').isFloat()]), asyncHandler(async (req, res) => {
+r.post('/:id/pickup', validate([body('otp').customSanitizer(norm).isLength({ min: 6, max: 6 }).withMessage('Enter the 6-digit pickup code from the donor')]), asyncHandler(async (req, res) => {
+  const d = await Delivery.findOne({ _id: req.params.id, partner: req.user._id, status: 'ASSIGNED' }).select('+pickupOtp +dropoffOtp').populate(POP);
+  if (!d) throw new ApiError(404, 'Delivery not found (or pickup already confirmed)');
+  const code = norm(req.body.otp);
+  if (norm(d.pickupOtp) !== code) throw new ApiError(400, norm(d.dropoffOtp) === code ? 'That is the delivery code. Ask the donor for the pickup code.' : 'Pickup code does not match. Ask the donor to read the code on their screen.');
+  push(d, 'PICKED_UP');
+  if (d.mode === 'RECIPIENT_PICKUP') {
+    push(d, 'DELIVERED'); await d.save(); await complete(d);
+  } else {
+    push(d, 'IN_TRANSIT'); await d.save();
+    await Donation.updateOne({ _id: d.donation._id }, { status: 'IN_TRANSIT' });
+    await notify(d.recipient._id, { type: 'delivery', title: 'Food picked up', body: `${d.donation.foodName} is on the way.`, link: `/app/track/${d._id}` });
+  }
+  broadcast(d);
+  res.json(d);
+}));
+
+r.post('/:id/location', validate([body('lat').isFloat(), body('lng').isFloat()]), asyncHandler(async (req, res) => {
   const d = await Delivery.findOne({ _id: req.params.id, partner: req.user._id, status: { $in: ['ASSIGNED', 'PICKED_UP', 'IN_TRANSIT'] } });
   if (!d) throw new ApiError(404, 'No active delivery');
   const pt = { lat: +req.body.lat, lng: +req.body.lng, at: new Date() };
@@ -80,22 +111,21 @@ r.post('/:id/location', authorize('DELIVERY'), validate([body('lat').isFloat(), 
   res.json({ ok: true });
 }));
 
-r.post('/:id/deliver', authorize('DELIVERY'), validate([body('otp').isLength({ min: 6, max: 6 }).withMessage('Enter the 6-digit code from the recipient')]), asyncHandler(async (req, res) => {
-  const d = await Delivery.findOne({ _id: req.params.id, partner: req.user._id, status: 'IN_TRANSIT' }).select('+dropoffOtp').populate(POP);
-  if (!d) throw new ApiError(404, 'Delivery not found');
-  if (d.dropoffOtp !== req.body.otp) throw new ApiError(400, 'Delivery code does not match');
+r.post('/:id/deliver', validate([body('otp').customSanitizer(norm).isLength({ min: 6, max: 6 }).withMessage('Enter the 6-digit code from the recipient')]), asyncHandler(async (req, res) => {
+  const d = await Delivery.findOne({ _id: req.params.id, partner: req.user._id, status: 'IN_TRANSIT' }).select('+pickupOtp +dropoffOtp').populate(POP);
+  if (!d) throw new ApiError(404, 'Delivery not found (or already delivered)');
+  const code = norm(req.body.otp);
+  if (norm(d.dropoffOtp) !== code) throw new ApiError(400, norm(d.pickupOtp) === code ? 'That is the pickup code. Ask the recipient for the delivery code.' : 'Delivery code does not match. Ask the recipient to read the code on their screen.');
   push(d, 'DELIVERED');
   await d.save();
-  await Donation.updateOne({ _id: d.donation._id }, { status: 'COMPLETED' });
-  await QuantumMatchingAssignment.updateOne({ _id: d.assignment }, { assignmentStatus: 'COMPLETED' });
-  await notifyMany([d.donation.donor, d.recipient._id], { type: 'completed', title: 'Donation delivered', body: `${d.donation.foodName} reached ${d.recipient.name}. Leave feedback?`, link: '/app/feedback' });
+  await complete(d);
   broadcast(d);
   res.json(d);
 }));
 
-r.post('/:id/fail', authorize('DELIVERY', 'ADMIN'), validate([body('reason').trim().notEmpty().withMessage('Say what went wrong')]), asyncHandler(async (req, res) => {
+r.post('/:id/fail', validate([body('reason').trim().notEmpty().withMessage('Say what went wrong')]), asyncHandler(async (req, res) => {
   const d = await Delivery.findById(req.params.id).populate(POP);
-  if (!d || (req.user.role === 'DELIVERY' && d.partner?._id.toString() !== req.user._id.toString())) throw new ApiError(404, 'Delivery not found');
+  if (!d || (req.user.role !== 'ADMIN' && !sameId(d.partner?._id, req.user._id))) throw new ApiError(404, 'Delivery not found');
   const before = d.status;
   if (before === 'ASSIGNED') {
     // Partner dropped out before pickup: reopen for another partner.

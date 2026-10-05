@@ -3,7 +3,9 @@ import cron from 'node-cron';
 import Donation from '../models/Donation.js';
 import FoodRequest from '../models/FoodRequest.js';
 import { QuantumMatchingAssignment } from '../models/Quantum.js';
-import { notify } from '../services/notify.js';
+import Waste from '../models/Waste.js';
+import User from '../models/User.js';
+import { notify, notifyMany } from '../services/notify.js';
 import { scheduleRematch } from '../services/quantum.js';
 
 const MATCH_TIMEOUT_MIN = +process.env.MATCH_ACCEPT_TIMEOUT_MIN || 20;
@@ -17,7 +19,16 @@ export async function expirySweep() {
     d.status = 'EXPIRED';
     await d.save();
     await QuantumMatchingAssignment.updateMany({ donationId: d._id, assignmentStatus: 'PROPOSED' }, { assignmentStatus: 'SUPERSEDED' });
-    await notify(d.donor, { type: 'expired', title: 'Donation expired', body: `${d.foodName} passed its usable-until time and was removed from matching.` });
+    // Unmatched food is not thrown away: it is routed to waste management (compost / biogas / animal feed).
+    const method = d.isVeg === false ? 'BIOGAS' : 'COMPOST';
+    const created = await Waste.updateOne({ donation: d._id }, { $setOnInsert: {
+      donation: d._id, donor: d.donor, foodName: d.foodName, quantity: d.quantity, unit: d.unit, isVeg: d.isVeg, method,
+      address: d.address, lat: d.location?.coordinates?.[1], lng: d.location?.coordinates?.[0] } }, { upsert: true });
+    await notify(d.donor, { type: 'expired', title: 'Sent to waste management', body: `${d.foodName} could not be matched in time, so it was sent to a waste-management partner (${method.replace('_', ' ').toLowerCase()}).`, link: '/app/waste' });
+    if (created.upsertedCount) {
+      const partners = await User.find({ role: 'WASTE_PARTNER', accountStatus: 'ACTIVE' }).select('_id').limit(100);
+      if (partners.length) await notifyMany(partners.map((x) => x._id), { type: 'waste', title: 'New waste pickup', body: `${d.foodName} (${d.quantity} ${d.unit}) needs collection.`, link: '/app/waste' });
+    }
     if (wasMatched && d.matchedNgo) await notify(d.matchedNgo, { type: 'expired', title: 'Matched food expired', body: d.foodName });
   }
 

@@ -71,7 +71,8 @@ r.post('/matches/:id/accept', authorize('NGO', 'BENEFICIARY'), requireVerified, 
     pickupOtp: makeOtp(), dropoffOtp: makeOtp(), route: await route(pickup, dropoff), timeline: [{ status: 'AWAITING_PARTNER' }] });
   await Conversation.create({ participants: [d.donor, req.user._id], donation: d._id, delivery: delivery._id });
 
-  await notify(d.donor, { type: 'accepted', title: 'NGO accepted your food', body: `${req.user.name} accepted ${d.foodName}. A delivery partner is being assigned.`, link: '/app/deliveries' });
+  await notify(d.donor, { type: 'accepted', title: 'NGO accepted your food', body: `${req.user.name} accepted ${d.foodName}. A delivery partner can pick it up, or you can deliver it yourself from the Deliveries page.`, link: `/app/track/${delivery._id}` });
+  await notify(req.user._id, { type: 'accepted', title: 'Match accepted', body: `Open the delivery: wait for a delivery partner, or collect ${d.foodName} yourself if you can.`, link: `/app/track/${delivery._id}` });
   emitToRole('DELIVERY', 'delivery:new', { deliveryId: delivery._id, distanceKm: delivery.route.distanceKm });
   res.json({ assignment: a, delivery });
 }));

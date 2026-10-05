@@ -4,7 +4,7 @@ import { Conversation, Message, Notification, Feedback } from '../models/Misc.js
 import Delivery from '../models/Delivery.js';
 import { protect } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
-import { isOnline } from '../services/socket.js';
+import { isOnline, emitToRoom, emitToUser } from '../services/socket.js';
 import { translate } from '../services/external.js';
 import { ApiError, asyncHandler } from '../utils/http.js';
 
@@ -20,6 +20,19 @@ r.get('/chat', asyncHandler(async (req, res) => {
     c.participants = c.participants.map((p) => ({ ...p, online: isOnline(p._id) }));
   }
   res.json(convs);
+}));
+
+r.post('/chat/:id/messages', asyncHandler(async (req, res) => {
+  const c = await Conversation.findOne({ _id: req.params.id, participants: req.user._id });
+  if (!c) throw new ApiError(404, 'Conversation not found');
+  const text = String(req.body.text || '').trim().slice(0, 2000);
+  if (!text) throw new ApiError(400, 'Write a message first');
+  const msg = await Message.create({ conversation: c._id, sender: req.user._id, text, readBy: [req.user._id] });
+  c.lastMessageAt = new Date(); await c.save();
+  const payload = { ...msg.toObject(), sender: { _id: req.user._id, name: req.user.name } };
+  emitToRoom(`conv:${c._id}`, 'chat:message', payload);
+  c.participants.filter((x) => x.toString() !== req.user._id.toString()).forEach((x) => emitToUser(x, 'chat:unread', { conversationId: c._id }));
+  res.status(201).json(payload);
 }));
 
 r.get('/chat/:id/messages', asyncHandler(async (req, res) => {
