@@ -13,11 +13,11 @@ r.use(protect);
 
 // ---- chat ---------------------------------------------------------------
 r.get('/chat', asyncHandler(async (req, res) => {
-  const convs = await Conversation.find({ participants: req.user._id }).populate('participants', 'name role avatarUrl')
-    .populate('donation', 'foodName').sort('-lastMessageAt -createdAt').lean();
+  const convs = await Conversation.find({ participants: req.user._id }).populate('participants', 'name role avatarUrl phone')
+    .populate('donation', 'foodName quantity unit').populate('delivery', 'status').sort('-lastMessageAt -createdAt').lean();
   for (const c of convs) {
     c.unread = await Message.countDocuments({ conversation: c._id, readBy: { $ne: req.user._id } });
-    c.participants = c.participants.map((p) => ({ ...p, online: isOnline(p._id) }));
+    c.participants = (c.participants || []).filter(Boolean).map((p) => ({ ...p, online: isOnline(p._id) }));
   }
   res.json(convs);
 }));

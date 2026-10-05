@@ -9,7 +9,13 @@ import { analyzeFood } from '../services/ai/foodQuality.js';
 import { evaluateDonation } from '../services/safety.js';
 import { donationRisk } from '../services/fraud.js';
 import { scheduleRematch } from '../services/quantum.js';
-import { notify } from '../services/notify.js';
+import { notify, notifyMany } from '../services/notify.js';
+import User from '../models/User.js';
+import FoodRequest from '../models/FoodRequest.js';
+import Delivery from '../models/Delivery.js';
+import { QuantumMatchingAssignment } from '../models/Quantum.js';
+import { Conversation } from '../models/Misc.js';
+import { makeOtp, route } from '../services/external.js';
 import { emitToRole } from '../services/socket.js';
 import { AuditLog } from '../models/Misc.js';
 import { ApiError, asyncHandler } from '../utils/http.js';
@@ -66,7 +72,12 @@ r.post('/', authorize('DONOR'), upload.array('images', 4), validate([
 
   const d = await Donation.create(doc);
   if (d.status === 'PENDING_REVIEW') emitToRole('ADMIN', 'review:new', { donationId: d._id });
-  if (d.status === 'AVAILABLE') scheduleRematch('new donation');
+  if (d.status === 'AVAILABLE') {
+    // Tell every NGO and individual in need right away: first to claim gets the food.
+    const people = await User.find({ role: { $in: ['NGO', 'BENEFICIARY'] }, accountStatus: 'ACTIVE' }).select('_id').limit(500);
+    if (people.length) notifyMany(people.map((u) => u._id), { type: 'new_food', title: 'New food available', body: `${d.foodName} (${d.quantity} ${d.unit}) is available now. First come, first served.`, link: '/app/available' }).catch(() => {});
+    scheduleRematch('new donation');
+  }
   res.status(201).json(d);
 }));
 
@@ -80,6 +91,32 @@ r.get('/available', authorize('NGO', 'BENEFICIARY', 'ADMIN'), asyncHandler(async
     f.location = { $near: { $geometry: { type: 'Point', coordinates: [+req.query.lng, +req.query.lat] }, $maxDistance: (+req.query.km || 25) * 1000 } };
   }
   res.json(await Donation.find(f).populate('donor', 'name city').limit(100));
+}));
+
+// First come, first served: the first NGO / person to claim gets the food.
+r.post('/:id/claim', authorize('NGO', 'BENEFICIARY'), asyncHandler(async (req, res) => {
+  const prev = await Donation.findOneAndUpdate(
+    { _id: req.params.id, usableUntil: { $gt: new Date() }, $or: [{ status: 'AVAILABLE' }, { status: 'MATCHED', matchedNgo: req.user._id }] },
+    { status: 'ACCEPTED', matchedNgo: req.user._id }, { new: false });
+  if (!prev) throw new ApiError(409, 'Someone else already claimed this food, or it is no longer available');
+  await QuantumMatchingAssignment.updateMany({ donationId: prev._id, assignmentStatus: 'PROPOSED' }, { assignmentStatus: 'SUPERSEDED' });
+  const openReq = await FoodRequest.findOne({ requester: req.user._id, status: { $in: ['OPEN', 'PARTIALLY_FULFILLED'] } }).sort('requiredBefore');
+  if (openReq) {
+    openReq.fulfilledQuantity += Math.min(prev.quantity, Math.max(0, openReq.quantity - openReq.fulfilledQuantity));
+    openReq.status = openReq.fulfilledQuantity >= openReq.quantity ? 'FULFILLED' : 'PARTIALLY_FULFILLED';
+    await openReq.save();
+  }
+  const pickup = { address: prev.address, lat: prev.location.coordinates[1], lng: prev.location.coordinates[0] };
+  const [uLng, uLat] = req.user.location?.coordinates || [0, 0];
+  const at = uLat || uLng ? { lat: uLat, lng: uLng } : openReq?.location?.coordinates ? { lat: openReq.location.coordinates[1], lng: openReq.location.coordinates[0] } : { lat: pickup.lat, lng: pickup.lng };
+  const dropoff = { address: req.user.address || openReq?.address || req.user.name, ...at };
+  const delivery = await Delivery.create({ donation: prev._id, recipient: req.user._id, pickup, dropoff,
+    pickupOtp: makeOtp(), dropoffOtp: makeOtp(), route: await route(pickup, dropoff), timeline: [{ status: 'AWAITING_PARTNER' }] });
+  await Conversation.create({ participants: [prev.donor, req.user._id], donation: prev._id, delivery: delivery._id, lastMessageAt: new Date() });
+  await notify(prev.donor, { type: 'accepted', title: 'Your food was claimed', body: `${req.user.name} claimed ${prev.foodName}. A delivery partner can pick it up, or you can deliver it yourself.`, link: `/app/track/${delivery._id}` });
+  if (prev.matchedNgo && prev.matchedNgo.toString() !== req.user._id.toString()) await notify(prev.matchedNgo, { type: 'match_changed', title: 'Food was claimed by someone else', body: prev.foodName });
+  emitToRole('DELIVERY', 'delivery:new', { deliveryId: delivery._id, distanceKm: delivery.route.distanceKm });
+  res.json({ delivery });
 }));
 
 r.get('/review-queue', authorize('ADMIN'), asyncHandler(async (_req, res) => {
